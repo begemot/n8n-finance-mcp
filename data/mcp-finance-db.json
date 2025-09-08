@@ -1,0 +1,18 @@
+{
+  "users": [
+    {
+      "id": "usr_35w566_mf77d97f",
+      "name": "Иван",
+      "email": "ivan@example.com",
+      "createdAt": "2025-09-05T19:03:04.155Z"
+    },
+    {
+      "id": "usr_j5ybc3_mf77db7u",
+      "name": "Иван",
+      "email": "ivan@example.com",
+      "createdAt": "2025-09-05T19:03:06.761Z"
+    }
+  ],
+  "categories": [],
+  "entries": []
+}

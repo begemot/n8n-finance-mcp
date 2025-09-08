@@ -1,0 +1,7 @@
+node_modules/*
+
+index.js.map
+index.d.ts.map
+index.js
+package-lock.json
+tsconfig.json
