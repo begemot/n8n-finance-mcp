@@ -29,5 +29,6 @@ COPY --from=builder /app/dist ./dist
 ENV DB_PATH=/data/mcp-finance-db.json
 VOLUME ["/data"]
 
-# важно: STDIO MCP сервер
+# HTTP MCP сервер
+EXPOSE 3000
 CMD ["node", "dist/index.js"]
