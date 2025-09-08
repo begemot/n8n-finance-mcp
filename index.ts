@@ -1,5 +1,5 @@
 /**
- * MCP Finance Server — STDIO (n8n MCP Client совместим)
+ * MCP Finance Server — HTTP Streamable (совместим с n8n MCP Client)
  * -----------------------------------------------------
  * Функционал:
  * - user.*: list/add/update/delete
@@ -8,23 +8,24 @@
  * - balance.category.total, balance.category.period
  *
  * Запуск (dev):
- *   npm i @modelcontextprotocol/sdk zod
- *   npm i -D typescript tsx @types/node
+ *   npm i
  *   npx tsx index.ts
  *
  * Подключение в n8n (узел MCP Client):
- *   Server Transport: Command
- *   Command: npx
- *   Arguments: tsx index.ts
+ *   Server Transport: HTTP Streamable
+ *   Endpoint: http://localhost:3000/mcp
  *   Authentication: None
  *   Tools: загрузятся автоматически
  */
 
+import express, { Request, Response } from "express";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 type ID = string;
 
@@ -41,7 +42,10 @@ const DB_PATH = process.env.DB_PATH || path.resolve(process.cwd(), "mcp-finance-
 
 async function ensureDB(): Promise<void> {
   try { await fs.access(DB_PATH); }
-  catch { const empty: DB = { users: [], categories: [], entries: [] }; await fs.writeFile(DB_PATH, JSON.stringify(empty, null, 2), "utf-8"); }
+  catch {
+    const empty: DB = { users: [], categories: [], entries: [] };
+    await fs.writeFile(DB_PATH, JSON.stringify(empty, null, 2), "utf-8");
+  }
 }
 async function readDB(): Promise<DB> { await ensureDB(); return JSON.parse(await fs.readFile(DB_PATH, "utf-8")) as DB; }
 async function writeDB(db: DB): Promise<void> { await fs.writeFile(DB_PATH, JSON.stringify(db, null, 2), "utf-8"); }
@@ -79,112 +83,165 @@ const BalanceTotal = z.object({ userId: z.string(), categoryId: z.string() });
 const BalancePeriod = z.object({ userId: z.string(), categoryId: z.string(), start: z.string(), end: z.string() });
 
 // -----------------------------
-// MCP Server (STDIO)
+// Создание MCP-сервера и регистрация инструментов
 // -----------------------------
 
-const server = new Server(
-  { name: "mcp-finance-server", version: "0.2.0" },
-  { capabilities: { tools: {} } }
-);
+function createServer(): Server {
+  const server = new Server(
+    { name: "mcp-finance-server", version: "0.2.0" },
+    { capabilities: { tools: {} } }
+  );
 
-function addTool<I extends z.ZodTypeAny, O>(name: string, schema: I, description: string, fn: (input: z.infer<I>) => Promise<O> | O) {
-  // @ts-ignore
-  server.addTool?.({
-    name,
-    description,
-    inputSchema: schema,
-    execute: async ({ input }: { input: z.infer<I> }) => await fn(input),
-  }) ?? (server as any).tool?.(name, { description, inputSchema: schema }, async (input: any) => fn(input));
+  function addTool<I extends z.ZodTypeAny, O>(name: string, schema: I, description: string, fn: (input: z.infer<I>) => Promise<O> | O) {
+    // @ts-ignore
+    server.addTool?.({
+      name,
+      description,
+      inputSchema: schema,
+      execute: async ({ input }: { input: z.infer<I> }) => await fn(input),
+    }) ?? (server as any).tool?.(name, { description, inputSchema: schema }, async (input: any) => fn(input));
+  }
+
+  // ---- Пользователи ----
+  addTool("user.list", z.object({}), "Список пользователей", async () => ({ users: (await readDB()).users }));
+
+  addTool("user.add", UserCreate, "Добавить пользователя", async ({ name, email }) => {
+    const db = await readDB(); const now = new Date().toISOString();
+    const user: User = { id: uid("usr"), name, email, createdAt: now }; db.users.push(user); await writeDB(db); return { user };
+  });
+
+  addTool("user.update", UserUpdate, "Изменить пользователя", async ({ id, name, email }) => {
+    const db = await readDB(); const u = db.users.find(x => x.id === id); if (!u) throw new Error("User not found");
+    if (name !== undefined) u.name = name; if (email !== undefined) u.email = email; await writeDB(db); return { user: u };
+  });
+
+  addTool("user.delete", UserId, "Удалить пользователя", async ({ id }) => {
+    const db = await readDB(); const before = db.users.length;
+    db.users = db.users.filter(u => u.id !== id); db.categories = db.categories.filter(c => c.userId !== id); db.entries = db.entries.filter(e => e.userId !== id);
+    await writeDB(db); return { deleted: before !== db.users.length };
+  });
+
+  // ---- Категории ----
+  addTool("category.list", CategoryList, "Список категорий пользователя", async ({ userId }) => ({ categories: (await readDB()).categories.filter(c => c.userId === userId) }));
+
+  addTool("category.add", CategoryCreate, "Добавить категорию", async ({ userId, name }) => {
+    const db = await readDB(); if (!db.users.find(u => u.id === userId)) throw new Error("User not found");
+    const now = new Date().toISOString(); const cat: Category = { id: uid("cat"), userId, name, createdAt: now }; db.categories.push(cat); await writeDB(db); return { category: cat };
+  });
+
+  addTool("category.update", CategoryUpdate, "Переименовать категорию", async ({ id, name }) => {
+    const db = await readDB(); const c = db.categories.find(x => x.id === id); if (!c) throw new Error("Category not found"); c.name = name; await writeDB(db); return { category: c };
+  });
+
+  addTool("category.delete", CategoryId, "Удалить категорию", async ({ id }) => {
+    const db = await readDB(); const before = db.categories.length; db.categories = db.categories.filter(c => c.id !== id);
+    db.entries = db.entries.map(e => (e.categoryId === id ? { ...e, categoryId: "" } : e)); await writeDB(db); return { deleted: before !== db.categories.length };
+  });
+
+  // ---- Записи ----
+  addTool("entry.list", EntryList, "Список записей", async ({ userId, categoryId, start, end }) => {
+    const db = await readDB(); let items = db.entries.filter(e => e.userId === userId);
+    if (categoryId) items = items.filter(e => e.categoryId === categoryId);
+    if (start) items = items.filter(e => parseISO(e.timestamp) >= parseISO(start));
+    if (end) items = items.filter(e => parseISO(e.timestamp) < parseISO(end));
+    items.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp)); return { entries: items };
+  });
+
+  addTool("entry.add", EntryCreate, "Добавить запись доход/расход", async ({ userId, categoryId, kind, amount, currency, timestamp, note }) => {
+    const db = await readDB(); const u = db.users.find(x => x.id === userId); if (!u) throw new Error("User not found");
+    if (categoryId) { const c = db.categories.find(x => x.id === categoryId && x.userId === userId); if (!c) throw new Error("Category not found for this user"); }
+    const now = new Date().toISOString(); const ts = timestamp ? parseISO(timestamp).toISOString() : now;
+    const e: Entry = { id: uid("ent"), userId, categoryId, kind, amount, currency, timestamp: ts, note, createdAt: now };
+    db.entries.push(e); await writeDB(db); return { entry: e };
+  });
+
+  addTool("entry.update", EntryUpdate, "Изменить запись", async (payload) => {
+    const db = await readDB(); const e = db.entries.find(x => x.id === payload.id); if (!e) throw new Error("Entry not found");
+    if (payload.userId !== undefined) e.userId = payload.userId;
+    if (payload.categoryId !== undefined) e.categoryId = payload.categoryId;
+    if (payload.kind !== undefined) e.kind = payload.kind;
+    if (payload.amount !== undefined) e.amount = payload.amount;
+    if (payload.currency !== undefined) e.currency = payload.currency;
+    if (payload.timestamp !== undefined) e.timestamp = parseISO(payload.timestamp).toISOString();
+    if (payload.note !== undefined) e.note = payload.note; e.updatedAt = new Date().toISOString(); await writeDB(db); return { entry: e };
+  });
+
+  addTool("entry.delete", EntryId, "Удалить запись", async ({ id }) => {
+    const db = await readDB(); const before = db.entries.length; db.entries = db.entries.filter(e => e.id !== id); await writeDB(db); return { deleted: before !== db.entries.length };
+  });
+
+  // ---- Балансы ----
+  addTool("balance.category.total", BalanceTotal, "Баланс по категории за всё время", async ({ userId, categoryId }) => {
+    const db = await readDB(); const items = db.entries.filter(e => e.userId === userId && e.categoryId === categoryId); return { userId, categoryId, balance: sumBalance(items), count: items.length };
+  });
+
+  addTool("balance.category.period", BalancePeriod, "Баланс по категории за период", async ({ userId, categoryId, start, end }) => {
+    const db = await readDB(); const s = parseISO(start), e = parseISO(end);
+    const items = db.entries.filter(x => x.userId === userId && x.categoryId === categoryId && parseISO(x.timestamp) >= s && parseISO(x.timestamp) < e);
+    return { userId, categoryId, start: s.toISOString(), end: e.toISOString(), balance: sumBalance(items), count: items.length };
+  });
+
+  return server;
 }
 
-// ---- Пользователи ----
-addTool("user.list", z.object({}), "Список пользователей", async () => ({ users: (await readDB()).users }));
-
-addTool("user.add", UserCreate, "Добавить пользователя", async ({ name, email }) => {
-  const db = await readDB(); const now = new Date().toISOString();
-  const user: User = { id: uid("usr"), name, email, createdAt: now }; db.users.push(user); await writeDB(db); return { user };
-});
-
-addTool("user.update", UserUpdate, "Изменить пользователя", async ({ id, name, email }) => {
-  const db = await readDB(); const u = db.users.find(x => x.id === id); if (!u) throw new Error("User not found");
-  if (name !== undefined) u.name = name; if (email !== undefined) u.email = email; await writeDB(db); return { user: u };
-});
-
-addTool("user.delete", UserId, "Удалить пользователя", async ({ id }) => {
-  const db = await readDB(); const before = db.users.length;
-  db.users = db.users.filter(u => u.id !== id); db.categories = db.categories.filter(c => c.userId !== id); db.entries = db.entries.filter(e => e.userId !== id);
-  await writeDB(db); return { deleted: before !== db.users.length };
-});
-
-// ---- Категории ----
-addTool("category.list", CategoryList, "Список категорий пользователя", async ({ userId }) => ({ categories: (await readDB()).categories.filter(c => c.userId === userId) }));
-
-addTool("category.add", CategoryCreate, "Добавить категорию", async ({ userId, name }) => {
-  const db = await readDB(); if (!db.users.find(u => u.id === userId)) throw new Error("User not found");
-  const now = new Date().toISOString(); const cat: Category = { id: uid("cat"), userId, name, createdAt: now }; db.categories.push(cat); await writeDB(db); return { category: cat };
-});
-
-addTool("category.update", CategoryUpdate, "Переименовать категорию", async ({ id, name }) => {
-  const db = await readDB(); const c = db.categories.find(x => x.id === id); if (!c) throw new Error("Category not found"); c.name = name; await writeDB(db); return { category: c };
-});
-
-addTool("category.delete", CategoryId, "Удалить категорию", async ({ id }) => {
-  const db = await readDB(); const before = db.categories.length; db.categories = db.categories.filter(c => c.id !== id);
-  db.entries = db.entries.map(e => (e.categoryId === id ? { ...e, categoryId: "" } : e)); await writeDB(db); return { deleted: before !== db.categories.length };
-});
-
-// ---- Записи ----
-addTool("entry.list", EntryList, "Список записей", async ({ userId, categoryId, start, end }) => {
-  const db = await readDB(); let items = db.entries.filter(e => e.userId === userId);
-  if (categoryId) items = items.filter(e => e.categoryId === categoryId);
-  if (start) items = items.filter(e => parseISO(e.timestamp) >= parseISO(start));
-  if (end) items = items.filter(e => parseISO(e.timestamp) < parseISO(end));
-  items.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp)); return { entries: items };
-});
-
-addTool("entry.add", EntryCreate, "Добавить запись доход/расход", async ({ userId, categoryId, kind, amount, currency, timestamp, note }) => {
-  const db = await readDB(); const u = db.users.find(x => x.id === userId); if (!u) throw new Error("User not found");
-  if (categoryId) { const c = db.categories.find(x => x.id === categoryId && x.userId === userId); if (!c) throw new Error("Category not found for this user"); }
-  const now = new Date().toISOString(); const ts = timestamp ? parseISO(timestamp).toISOString() : now;
-  const e: Entry = { id: uid("ent"), userId, categoryId, kind, amount, currency, timestamp: ts, note, createdAt: now };
-  db.entries.push(e); await writeDB(db); return { entry: e };
-});
-
-addTool("entry.update", EntryUpdate, "Изменить запись", async (payload) => {
-  const db = await readDB(); const e = db.entries.find(x => x.id === payload.id); if (!e) throw new Error("Entry not found");
-  if (payload.userId !== undefined) e.userId = payload.userId;
-  if (payload.categoryId !== undefined) e.categoryId = payload.categoryId;
-  if (payload.kind !== undefined) e.kind = payload.kind;
-  if (payload.amount !== undefined) e.amount = payload.amount;
-  if (payload.currency !== undefined) e.currency = payload.currency;
-  if (payload.timestamp !== undefined) e.timestamp = parseISO(payload.timestamp).toISOString();
-  if (payload.note !== undefined) e.note = payload.note; e.updatedAt = new Date().toISOString(); await writeDB(db); return { entry: e };
-});
-
-addTool("entry.delete", EntryId, "Удалить запись", async ({ id }) => {
-  const db = await readDB(); const before = db.entries.length; db.entries = db.entries.filter(e => e.id !== id); await writeDB(db); return { deleted: before !== db.entries.length };
-});
-
-// ---- Балансы ----
-addTool("balance.category.total", BalanceTotal, "Баланс по категории за всё время", async ({ userId, categoryId }) => {
-  const db = await readDB(); const items = db.entries.filter(e => e.userId === userId && e.categoryId === categoryId); return { userId, categoryId, balance: sumBalance(items), count: items.length };
-});
-
-addTool("balance.category.period", BalancePeriod, "Баланс по категории за период", async ({ userId, categoryId, start, end }) => {
-  const db = await readDB(); const s = parseISO(start), e = parseISO(end);
-  const items = db.entries.filter(x => x.userId === userId && x.categoryId === categoryId && parseISO(x.timestamp) >= s && parseISO(x.timestamp) < e);
-  return { userId, categoryId, start: s.toISOString(), end: e.toISOString(), balance: sumBalance(items), count: items.length };
-});
-
 // -----------------------------
-// Запуск STDIO MCP-сервера
+// Запуск HTTP MCP-сервера
 // -----------------------------
 
 async function main() {
   await ensureDB();
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error(`[mcp-finance-server] running via STDIO. DB: ${DB_PATH}`);
+  const app = express();
+  app.use(express.json());
+
+  const transports: Record<string, StreamableHTTPServerTransport> = {};
+
+  app.post("/mcp", async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    let transport: StreamableHTTPServerTransport;
+
+    if (sessionId && transports[sessionId]) {
+      transport = transports[sessionId];
+    } else if (!sessionId && isInitializeRequest(req.body)) {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sid) => { transports[sid] = transport; },
+      });
+      const server = createServer();
+      transport.onclose = () => {
+        if (transport.sessionId) delete transports[transport.sessionId];
+        server.close();
+      };
+      await server.connect(transport);
+    } else {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+        id: null,
+      });
+      return;
+    }
+
+    await transport.handleRequest(req, res, req.body);
+  });
+
+  const handleSessionRequest = async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    if (!sessionId || !transports[sessionId]) {
+      res.status(400).send("Invalid or missing session ID");
+      return;
+    }
+    const transport = transports[sessionId];
+    await transport.handleRequest(req, res);
+  };
+
+  app.get("/mcp", handleSessionRequest);
+  app.delete("/mcp", handleSessionRequest);
+
+  const port = Number(process.env.PORT) || 3000;
+  app.listen(port, () => {
+    console.error(`[mcp-finance-server] running via HTTP on port ${port}. DB: ${DB_PATH}`);
+  });
 }
 
 main().catch((err) => { console.error("Fatal:", err); process.exit(1); });
+
