@@ -5,4 +5,5 @@ index.d.ts.map
 index.js
 package-lock.json
 tsconfig.json
-index.d.ts
+*mcp-finance-db.json
+
