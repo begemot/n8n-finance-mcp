@@ -25,7 +25,14 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolRequestSchema,
+  ErrorCode,
+  ListToolsRequestSchema,
+  McpError,
+  isInitializeRequest,
+} from "@modelcontextprotocol/sdk/types.js";
+import { zodToJsonSchema } from "zod-to-json-schema";
 
 type ID = string;
 
@@ -92,15 +99,46 @@ function createServer(): Server {
     { capabilities: { tools: {} } }
   );
 
-  function addTool<I extends z.ZodTypeAny, O>(name: string, schema: I, description: string, fn: (input: z.infer<I>) => Promise<O> | O) {
-    // @ts-ignore
-    server.addTool?.({
-      name,
-      description,
-      inputSchema: schema,
-      execute: async ({ input }: { input: z.infer<I> }) => await fn(input),
-    }) ?? (server as any).tool?.(name, { description, inputSchema: schema }, async (input: any) => fn(input));
+  const tools: Record<
+    string,
+    { schema: z.ZodTypeAny; description: string; handler: (input: any) => Promise<any> | any }
+  > = {};
+
+  function addTool<I extends z.ZodTypeAny, O>(
+    name: string,
+    schema: I,
+    description: string,
+    fn: (input: z.infer<I>) => Promise<O> | O
+  ) {
+    tools[name] = { schema, description, handler: fn };
   }
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: Object.entries(tools).map(([name, t]) => ({
+      name,
+      description: t.description,
+      inputSchema: zodToJsonSchema(t.schema, { strictUnions: true }),
+    })),
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const tool = tools[request.params.name];
+    if (!tool) {
+      throw new McpError(ErrorCode.InvalidParams, `Tool ${request.params.name} not found`);
+    }
+    const parsed = await tool.schema.safeParseAsync(request.params.arguments ?? {});
+    if (!parsed.success) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `Invalid arguments for tool ${request.params.name}: ${parsed.error.message}`
+      );
+    }
+    const result = await tool.handler(parsed.data);
+    return {
+      content: [{ type: "text", text: JSON.stringify(result) }],
+      structuredContent: result,
+    };
+  });
 
   // ---- Пользователи ----
   addTool("user.list", z.object({}), "Список пользователей", async () => ({ users: (await readDB()).users }));
