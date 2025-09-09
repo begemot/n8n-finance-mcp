@@ -2,10 +2,10 @@
  * MCP Finance Server — HTTP Streamable (совместим с n8n MCP Client)
  * -----------------------------------------------------
  * Функционал:
- * - user.*: list/add/update/delete
- * - category.*: list/add/update/delete
- * - entry.*: list/add/update/delete
- * - balance.category.total, balance.category.period
+ * - user_*: list/add/update/delete
+ * - category_*: list/add/update/delete
+ * - entry_*: list/add/update/delete
+ * - balance_category_total, balance_category_period
  *
  * Запуск (dev):
  *   npm i
@@ -141,43 +141,43 @@ function createServer(): Server {
   });
 
   // ---- Пользователи ----
-  addTool("user.list", z.object({}), "Список пользователей", async () => ({ users: (await readDB()).users }));
+  addTool("user_list", z.object({}), "Список пользователей", async () => ({ users: (await readDB()).users }));
 
-  addTool("user.add", UserCreate, "Добавить пользователя", async ({ name, email }) => {
+  addTool("user_add", UserCreate, "Добавить пользователя", async ({ name, email }) => {
     const db = await readDB(); const now = new Date().toISOString();
     const user: User = { id: uid("usr"), name, email, createdAt: now }; db.users.push(user); await writeDB(db); return { user };
   });
 
-  addTool("user.update", UserUpdate, "Изменить пользователя", async ({ id, name, email }) => {
+  addTool("user_update", UserUpdate, "Изменить пользователя", async ({ id, name, email }) => {
     const db = await readDB(); const u = db.users.find(x => x.id === id); if (!u) throw new Error("User not found");
     if (name !== undefined) u.name = name; if (email !== undefined) u.email = email; await writeDB(db); return { user: u };
   });
 
-  addTool("user.delete", UserId, "Удалить пользователя", async ({ id }) => {
+  addTool("user_delete", UserId, "Удалить пользователя", async ({ id }) => {
     const db = await readDB(); const before = db.users.length;
     db.users = db.users.filter(u => u.id !== id); db.categories = db.categories.filter(c => c.userId !== id); db.entries = db.entries.filter(e => e.userId !== id);
     await writeDB(db); return { deleted: before !== db.users.length };
   });
 
   // ---- Категории ----
-  addTool("category.list", CategoryList, "Список категорий пользователя", async ({ userId }) => ({ categories: (await readDB()).categories.filter(c => c.userId === userId) }));
+  addTool("category_list", CategoryList, "Список категорий пользователя", async ({ userId }) => ({ categories: (await readDB()).categories.filter(c => c.userId === userId) }));
 
-  addTool("category.add", CategoryCreate, "Добавить категорию", async ({ userId, name }) => {
+  addTool("category_add", CategoryCreate, "Добавить категорию", async ({ userId, name }) => {
     const db = await readDB(); if (!db.users.find(u => u.id === userId)) throw new Error("User not found");
     const now = new Date().toISOString(); const cat: Category = { id: uid("cat"), userId, name, createdAt: now }; db.categories.push(cat); await writeDB(db); return { category: cat };
   });
 
-  addTool("category.update", CategoryUpdate, "Переименовать категорию", async ({ id, name }) => {
+  addTool("category_update", CategoryUpdate, "Переименовать категорию", async ({ id, name }) => {
     const db = await readDB(); const c = db.categories.find(x => x.id === id); if (!c) throw new Error("Category not found"); c.name = name; await writeDB(db); return { category: c };
   });
 
-  addTool("category.delete", CategoryId, "Удалить категорию", async ({ id }) => {
+  addTool("category_delete", CategoryId, "Удалить категорию", async ({ id }) => {
     const db = await readDB(); const before = db.categories.length; db.categories = db.categories.filter(c => c.id !== id);
     db.entries = db.entries.map(e => (e.categoryId === id ? { ...e, categoryId: "" } : e)); await writeDB(db); return { deleted: before !== db.categories.length };
   });
 
   // ---- Записи ----
-  addTool("entry.list", EntryList, "Список записей", async ({ userId, categoryId, start, end }) => {
+  addTool("entry_list", EntryList, "Список записей", async ({ userId, categoryId, start, end }) => {
     const db = await readDB(); let items = db.entries.filter(e => e.userId === userId);
     if (categoryId) items = items.filter(e => e.categoryId === categoryId);
     if (start) items = items.filter(e => parseISO(e.timestamp) >= parseISO(start));
@@ -185,7 +185,7 @@ function createServer(): Server {
     items.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp)); return { entries: items };
   });
 
-  addTool("entry.add", EntryCreate, "Добавить запись доход/расход", async ({ userId, categoryId, kind, amount, currency, timestamp, note }) => {
+  addTool("entry_add", EntryCreate, "Добавить запись доход/расход", async ({ userId, categoryId, kind, amount, currency, timestamp, note }) => {
     const db = await readDB(); const u = db.users.find(x => x.id === userId); if (!u) throw new Error("User not found");
     if (categoryId) { const c = db.categories.find(x => x.id === categoryId && x.userId === userId); if (!c) throw new Error("Category not found for this user"); }
     const now = new Date().toISOString(); const ts = timestamp ? parseISO(timestamp).toISOString() : now;
@@ -193,7 +193,7 @@ function createServer(): Server {
     db.entries.push(e); await writeDB(db); return { entry: e };
   });
 
-  addTool("entry.update", EntryUpdate, "Изменить запись", async (payload) => {
+  addTool("entry_update", EntryUpdate, "Изменить запись", async (payload) => {
     const db = await readDB(); const e = db.entries.find(x => x.id === payload.id); if (!e) throw new Error("Entry not found");
     if (payload.userId !== undefined) e.userId = payload.userId;
     if (payload.categoryId !== undefined) e.categoryId = payload.categoryId;
@@ -204,16 +204,16 @@ function createServer(): Server {
     if (payload.note !== undefined) e.note = payload.note; e.updatedAt = new Date().toISOString(); await writeDB(db); return { entry: e };
   });
 
-  addTool("entry.delete", EntryId, "Удалить запись", async ({ id }) => {
+  addTool("entry_delete", EntryId, "Удалить запись", async ({ id }) => {
     const db = await readDB(); const before = db.entries.length; db.entries = db.entries.filter(e => e.id !== id); await writeDB(db); return { deleted: before !== db.entries.length };
   });
 
   // ---- Балансы ----
-  addTool("balance.category.total", BalanceTotal, "Баланс по категории за всё время", async ({ userId, categoryId }) => {
+  addTool("balance_category_total", BalanceTotal, "Баланс по категории за всё время", async ({ userId, categoryId }) => {
     const db = await readDB(); const items = db.entries.filter(e => e.userId === userId && e.categoryId === categoryId); return { userId, categoryId, balance: sumBalance(items), count: items.length };
   });
 
-  addTool("balance.category.period", BalancePeriod, "Баланс по категории за период", async ({ userId, categoryId, start, end }) => {
+  addTool("balance_category_period", BalancePeriod, "Баланс по категории за период", async ({ userId, categoryId, start, end }) => {
     const db = await readDB(); const s = parseISO(start), e = parseISO(end);
     const items = db.entries.filter(x => x.userId === userId && x.categoryId === categoryId && parseISO(x.timestamp) >= s && parseISO(x.timestamp) < e);
     return { userId, categoryId, start: s.toISOString(), end: e.toISOString(), balance: sumBalance(items), count: items.length };
