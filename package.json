@@ -22,7 +22,8 @@
     "@modelcontextprotocol/sdk": "^1.17.5",
     "body-parser": "^2.2.0",
     "express": "^5.1.0",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.24.6"
   },
   "type": "module"
 }
